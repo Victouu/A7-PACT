@@ -98,12 +98,22 @@ class Opinion extends DBModel
 
     public function likes(): int
     {
-        return count(OpinionLike::find(["opinion_id" => $this->id]));
+        // Use SQL COUNT for better performance
+        $statement = self::prepare("SELECT COUNT(*) as count FROM " . OpinionLike::tableName() . " WHERE opinion_id = :opinion_id");
+        $statement->bindValue(':opinion_id', $this->id);
+        $statement->execute();
+        $result = $statement->fetch(\PDO::FETCH_ASSOC);
+        return (int)($result['count'] ?? 0);
     }
 
     public function dislikes(): int
     {
-        return count(OpinionDislike::find(["opinion_id" => $this->id]));
+        // Use SQL COUNT for better performance
+        $statement = self::prepare("SELECT COUNT(*) as count FROM " . OpinionDislike::tableName() . " WHERE opinion_id = :opinion_id");
+        $statement->bindValue(':opinion_id', $this->id);
+        $statement->execute();
+        $result = $statement->fetch(\PDO::FETCH_ASSOC);
+        return (int)($result['count'] ?? 0);
     }
 
 

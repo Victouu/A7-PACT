@@ -633,45 +633,14 @@ class ApiController extends Controller
     // Return a list of user id with whom the user has a conversation
     public function conversations(Request $request, Response $response)
     {
-        function findData($message, $account_id, $conversations)
-        {
-            $user = UserAccount::findOneByPk($account_id);
-            if ($user) {
-                $member = MemberUser::findOneByPk($account_id);
-                $professionnal = ProfessionalUser::findOneByPk(pkValue: $account_id);
-                if ($member) {
-                    $conversations[] = [
-                        'account_id' => $account_id,
-                        'name' => $member->pseudo,
-                        'avatar_url' => $user->avatar_url,
-                        'last_message' => $message,
-                    ];
-                } else if ($professionnal) {
-                    $conversations[] = [
-                        'account_id' => $account_id,
-                        'name' => $professionnal->denomination,
-                        'avatar_url' => $user->avatar_url,
-                        'last_message' => $message,
-                    ];
-                } else {
-                    $conversations[] = [
-                        'account_id' => $account_id,
-                        'name' => null,
-                        'avatar_url' => $user->avatar_url,
-                        'last_message' => $message,
-                    ];
-                }
-            }
-            return $conversations;
-        }
-
         $messages = Message::find(['receiver_id' => Application::$app->user->account_id, 'deleted' => 'false']);
         $conversations = [];
         $last_message = [];
-        $i = [];
+        $account_ids = [];
+        
         foreach ($messages as $message) {
-            if (!in_array($message->sender_id, $i)) {
-                $i[] = $message->sender_id;
+            if (!in_array($message->sender_id, $account_ids)) {
+                $account_ids[] = $message->sender_id;
                 $last_message[$message->sender_id] = $message;
             } else if ($message->sended_date > $last_message[$message->sender_id]->sended_date) {
                 $last_message[$message->sender_id] = $message;
@@ -680,20 +649,78 @@ class ApiController extends Controller
 
         $messages = Message::find(['sender_id' => Application::$app->user->account_id, 'deleted' => 'false']);
         foreach ($messages as $message) {
-            if (!in_array($message->receiver_id, $i)) {
-                $i[] = $message->receiver_id;
+            if (!in_array($message->receiver_id, $account_ids)) {
+                $account_ids[] = $message->receiver_id;
                 $last_message[$message->receiver_id] = $message;
             } else if ($message->sended_date > $last_message[$message->receiver_id]->sended_date) {
                 $last_message[$message->receiver_id] = $message;
             }
         }
 
-        foreach ($last_message as $key => $value) {
-            $conversations = findData($value, $key, $conversations);
+        // Batch fetch all user data to avoid N+1 queries
+        if (!empty($account_ids)) {
+            $placeholders = implode(',', array_fill(0, count($account_ids), '?'));
+            
+            // Fetch all users at once
+            $userSql = "SELECT * FROM " . UserAccount::tableName() . " WHERE " . UserAccount::pk() . " IN ($placeholders)";
+            $userStmt = UserAccount::prepare($userSql);
+            foreach ($account_ids as $index => $accountId) {
+                $userStmt->bindValue($index + 1, $accountId);
+            }
+            $userStmt->execute();
+            $users = $userStmt->fetchAll(\PDO::FETCH_CLASS, UserAccount::class);
+            $usersById = [];
+            foreach ($users as $user) {
+                $usersById[$user->account_id] = $user;
+            }
+            
+            // Fetch all members at once
+            $memberSql = "SELECT * FROM " . MemberUser::tableName() . " WHERE " . MemberUser::pk() . " IN ($placeholders)";
+            $memberStmt = MemberUser::prepare($memberSql);
+            foreach ($account_ids as $index => $accountId) {
+                $memberStmt->bindValue($index + 1, $accountId);
+            }
+            $memberStmt->execute();
+            $members = $memberStmt->fetchAll(\PDO::FETCH_CLASS, MemberUser::class);
+            $membersById = [];
+            foreach ($members as $member) {
+                $membersById[$member->user_id] = $member;
+            }
+            
+            // Fetch all professionals at once
+            $profSql = "SELECT * FROM " . ProfessionalUser::tableName() . " WHERE " . ProfessionalUser::pk() . " IN ($placeholders)";
+            $profStmt = ProfessionalUser::prepare($profSql);
+            foreach ($account_ids as $index => $accountId) {
+                $profStmt->bindValue($index + 1, $accountId);
+            }
+            $profStmt->execute();
+            $professionals = $profStmt->fetchAll(\PDO::FETCH_CLASS, ProfessionalUser::class);
+            $professionalsById = [];
+            foreach ($professionals as $professional) {
+                $professionalsById[$professional->user_id] = $professional;
+            }
         }
 
-        foreach ($conversations as $key => $value) {
-            unset($conversations[$key]['last_message']->errors);
+        // Build conversations using cached data
+        foreach ($last_message as $account_id => $message) {
+            if (isset($usersById[$account_id])) {
+                $user = $usersById[$account_id];
+                $conversation = [
+                    'account_id' => $account_id,
+                    'name' => null,
+                    'avatar_url' => $user->avatar_url,
+                    'last_message' => $message,
+                ];
+                
+                if (isset($membersById[$account_id])) {
+                    $conversation['name'] = $membersById[$account_id]->pseudo;
+                } else if (isset($professionalsById[$account_id])) {
+                    $conversation['name'] = $professionalsById[$account_id]->denomination;
+                }
+                
+                unset($conversation['last_message']->errors);
+                $conversations[] = $conversation;
+            }
         }
 
         usort($conversations, function ($a, $b) {
