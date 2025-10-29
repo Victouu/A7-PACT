@@ -136,25 +136,50 @@ class Offer extends DBModel
 
     public function tags(): array
     {
-        $tags = [];
-        $association = OfferIsTagged::find(['offer_id' => $this->id]);
-
-        foreach ($association as $tagAssoc) {
-            $tag = OfferTag::findOne(['id' => $tagAssoc->tag_id]);
-            $tags[] = $tag;
+        $associations = OfferIsTagged::find(['offer_id' => $this->id]);
+        
+        if (empty($associations)) {
+            return [];
         }
 
-        return $tags;
+        // Collect all tag IDs and fetch in a single query to avoid N+1
+        $tagIds = array_map(fn($assoc) => $assoc->tag_id, $associations);
+        
+        // Use IN clause to fetch all tags at once
+        $placeholders = implode(',', array_fill(0, count($tagIds), '?'));
+        $sql = "SELECT * FROM " . OfferTag::tableName() . " WHERE id IN ($placeholders)";
+        $statement = self::prepare($sql);
+        
+        foreach ($tagIds as $index => $tagId) {
+            $statement->bindValue($index + 1, $tagId);
+        }
+        
+        $statement->execute();
+        return $statement->fetchAll(\PDO::FETCH_CLASS, OfferTag::class);
     }
 
     public function schedule(): array
     {
-        $schedules = [];
         $associations = LinkSchedule::find(['offer_id' => $this->id]);
-        foreach ($associations as $association) {
-            $schedules[] = OfferSchedule::findOneByPk($association->schedule_id);
+        
+        if (empty($associations)) {
+            return [];
         }
-        return $schedules;
+
+        // Collect all schedule IDs and fetch in a single query to avoid N+1
+        $scheduleIds = array_map(fn($assoc) => $assoc->schedule_id, $associations);
+        
+        // Use IN clause to fetch all schedules at once
+        $placeholders = implode(',', array_fill(0, count($scheduleIds), '?'));
+        $sql = "SELECT * FROM " . OfferSchedule::tableName() . " WHERE " . OfferSchedule::pk() . " IN ($placeholders)";
+        $statement = self::prepare($sql);
+        
+        foreach ($scheduleIds as $index => $scheduleId) {
+            $statement->bindValue($index + 1, $scheduleId);
+        }
+        
+        $statement->execute();
+        return $statement->fetchAll(\PDO::FETCH_CLASS, OfferSchedule::class);
     }
 
     /**
@@ -235,12 +260,22 @@ class Offer extends DBModel
 
     public function opinionsCount(): int
     {
-        return count($this->opinions());
+        // Use SQL COUNT for better performance instead of fetching all records
+        $statement = self::prepare("SELECT COUNT(*) as count FROM " . Opinion::tableName() . " WHERE offer_id = :offer_id");
+        $statement->bindValue(':offer_id', $this->id);
+        $statement->execute();
+        $result = $statement->fetch(\PDO::FETCH_ASSOC);
+        return (int)($result['count'] ?? 0);
     }
 
     public function noReadOpinions(): int
     {
-        return count(Opinion::find(['offer_id' => $this->id, 'read' => 0]));
+        // Use SQL COUNT for better performance instead of fetching all records
+        $statement = self::prepare("SELECT COUNT(*) as count FROM " . Opinion::tableName() . " WHERE offer_id = :offer_id AND read = 0");
+        $statement->bindValue(':offer_id', $this->id);
+        $statement->execute();
+        $result = $statement->fetch(\PDO::FETCH_ASSOC);
+        return (int)($result['count'] ?? 0);
     }
 
 
@@ -253,6 +288,11 @@ class Offer extends DBModel
 
     public function rating(): float
     {
+        // Return cached rating if available to avoid recalculating on every request
+        if ($this->rating > 0) {
+            return $this->rating;
+        }
+        
         $opinions = Opinion::find(['offer_id' => $this->id]);
         return count($opinions) > 0 ? round(array_sum(array_map(fn($opinion) => $opinion->rating, $opinions)) / count($opinions) * 2) / 2 : 0;
     }
@@ -284,20 +324,23 @@ class Offer extends DBModel
             $status = $lastMonthHistories[count($lastMonthHistories) - 1]->switch_to;
         }
 
-        //        echo $status;
+        // Pre-group histories by day to avoid filtering the entire array on each iteration
+        $historiesByDay = [];
+        foreach ($histories as $history) {
+            $day = (int)date('d', strtotime($history->created_at));
+            if (!isset($historiesByDay[$day])) {
+                $historiesByDay[$day] = [];
+            }
+            $historiesByDay[$day][] = $history;
+        }
 
-        //        echo "<pre>";
         for ($day = 1; $day <= $lastMonthDay; $day++) {
-            // Check if the status has change on this day
-            $dayHistories = array_filter($histories, fn($history) => date('d', strtotime($history->created_at)) == $day);
-            $dayHistories = array_values($dayHistories);
-
-            if (!empty($dayHistories)) {
+            // Check if the status has changed on this day
+            if (isset($historiesByDay[$day]) && !empty($historiesByDay[$day])) {
+                $dayHistories = $historiesByDay[$day];
                 $lastDayHistory = $dayHistories[count($dayHistories) - 1];
                 $status = $lastDayHistory->switch_to;
             }
-
-            //            echo $status . "($day)" . PHP_EOL;
 
             if ($status === "online") {
                 $count++;
@@ -315,10 +358,6 @@ class Offer extends DBModel
         $histories = OfferStatusHistory::query()->filters(['offer_id' => $this->id])->search(['created_at' => date('Y-m')])->order_by(['created_at'])->make();
         $currentDay = date('d');
         $count = 0;
-        //
-//        echo "<pre>";
-//        var_dump($lastMonthHistories);
-//        echo "</pre>";
 
         // Set status
         if (empty($lastMonthHistories)) {
@@ -327,26 +366,28 @@ class Offer extends DBModel
             $status = $lastMonthHistories[count($lastMonthHistories) - 1]->switch_to;
         }
 
-        //        echo $currentDay;
+        // Pre-group histories by day to avoid filtering the entire array on each iteration
+        $historiesByDay = [];
+        foreach ($histories as $history) {
+            $day = (int)date('d', strtotime($history->created_at));
+            if (!isset($historiesByDay[$day])) {
+                $historiesByDay[$day] = [];
+            }
+            $historiesByDay[$day][] = $history;
+        }
 
-        //        echo "<pre>";
         for ($day = 1; $day <= $currentDay; $day++) {
-            // Check if the status has change on this day
-            $dayHistories = array_filter($histories, fn($history) => date('d', strtotime($history->created_at)) == $day);
-            $dayHistories = array_values($dayHistories);
-
-            if (!empty($dayHistories)) {
+            // Check if the status has changed on this day
+            if (isset($historiesByDay[$day]) && !empty($historiesByDay[$day])) {
+                $dayHistories = $historiesByDay[$day];
                 $lastDayHistory = $dayHistories[count($dayHistories) - 1];
                 $status = $lastDayHistory->switch_to;
             }
-
-            //            echo $status . "($day)" . PHP_EOL;
 
             if ($status === "online") {
                 $count++;
             }
         }
-        //        echo "</pre>";
 
         return $count;
     }

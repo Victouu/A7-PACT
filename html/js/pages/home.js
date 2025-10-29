@@ -424,15 +424,12 @@ function createOfferCard(offer) {
 }
 
 async function fetchOffers() {
-    let offers = [];
+    // Fetch all offers in parallel instead of sequentially
+    const offerPromises = offerRecentlyConsulted.offerIds.map(offerId =>
+        fetch(`/api/offers/${offerId}`).then(response => response.json())
+    );
 
-    for (let offerId of offerRecentlyConsulted.offerIds) {
-        let response = await fetch(`/api/offers/${offerId}`);
-        let offer = await response.json();
-        offers.push(offer);
-    }
-
-    return offers;
+    return await Promise.all(offerPromises);
 }
 
 if (offerRecentlyConsulted.offerIds.length > 0) {
@@ -440,9 +437,12 @@ if (offerRecentlyConsulted.offerIds.length > 0) {
         let carousel = document.querySelector(".recently-consulted-carousel");
         console.log(offers)
 
+        // Use a temporary container to build all HTML at once instead of repeatedly modifying innerHTML
+        const tempContainer = document.createElement('div');
         for (let offer of offers) {
-            carousel.innerHTML += createOfferCard(offer);
+            tempContainer.innerHTML += createOfferCard(offer);
         }
+        carousel.appendChild(tempContainer);
 
         new Carousel(carousel, {
             slidesToScroll: 1,
